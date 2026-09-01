@@ -2796,6 +2796,54 @@
       });
     }
 
+    function compressDataUrl(dataUrl, maxSize, quality) {
+      return new Promise((resolve) => {
+        if (!dataUrl || !dataUrl.startsWith("data:image")) {
+          resolve(dataUrl);
+          return;
+        }
+        const img = new Image();
+        img.onload = function() {
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > maxSize) {
+              height = Math.round((height * maxSize) / width);
+              width = maxSize;
+            }
+          } else {
+            if (height > maxSize) {
+              width = Math.round((width * maxSize) / height);
+              height = maxSize;
+            }
+          }
+          const cv = document.createElement("canvas");
+          cv.width = width;
+          cv.height = height;
+          const ctx = cv.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(cv.toDataURL("image/jpeg", quality));
+        };
+        img.onerror = function() { resolve(dataUrl); };
+        img.src = dataUrl;
+      });
+    }
+
+    async function prepareNotebookForShare(notebook) {
+      const shareNotebook = JSON.parse(JSON.stringify(notebook));
+      const entries = shareNotebook.entries || [];
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (entry.images && entry.images.length) {
+          const compressed = await Promise.all(
+            entry.images.map((img) => compressDataUrl(img, 500, 0.6))
+          );
+          entry.images = compressed;
+        }
+      }
+      return shareNotebook;
+    }
+
     async function handleEntryImages() {
       const files = [...(entryImageInput.files || [])].filter((file) => file.type.startsWith("image/"));
       const remaining = Math.max(9 - selectedEntryImages.length, 0);
@@ -2886,9 +2934,9 @@
       const encoded = encodeURIComponent(longUrl);
       const tryFetch = async (serviceUrl) => {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
         try {
-          const resp = await fetch(serviceUrl, { signal: controller.signal });
+          const resp = await fetch(serviceUrl, { signal: controller.signal, mode: "cors" });
           clearTimeout(timeoutId);
           if (resp.ok) {
             const short = (await resp.text()).trim();
@@ -2899,7 +2947,9 @@
       };
       const services = [
         "https://is.gd/create.php?format=simple&url=" + encoded,
-        "https://tinyurl.com/api-create.php?url=" + encoded
+        "https://tinyurl.com/api-create.php?url=" + encoded,
+        "https://ulvis.net/api.php?url=" + encoded,
+        "https://cutt.ly/api/api.php?key=free&short=" + encoded
       ];
       return new Promise((resolve) => {
         let done = false;
@@ -2916,44 +2966,70 @@
     async function shareNotebook() {
       const notebook = getCurrentNotebook();
       if (!notebook) return;
-      const url = new URL(window.location.href);
-      url.search = "";
-      url.hash = "";
-      let dataStr = JSON.stringify(notebook);
-      let encoded = btoa(unescape(encodeURIComponent(dataStr)));
-      if (encoded.length > 100000) {
-        const lite = JSON.parse(JSON.stringify(notebook));
-        lite.entries = (lite.entries || []).map((e) => ({ ...e, images: [] }));
-        dataStr = JSON.stringify(lite);
-        encoded = btoa(unescape(encodeURIComponent(dataStr)));
-      }
-      url.searchParams.set("data", encoded);
-      const longUrl = url.toString();
 
       const originalLabel = shareButton.textContent;
       shareButton.textContent = "⏳";
       shareButton.style.pointerEvents = "none";
 
-      let text = longUrl;
       try {
-        const shortUrl = await shortenUrl(longUrl);
-        if (shortUrl) text = shortUrl;
-      } catch {}
+        const shareNotebookData = await prepareNotebookForShare(notebook);
+        const url = new URL(window.location.href);
+        url.search = "";
+        url.hash = "";
 
-      shareButton.textContent = originalLabel;
-      shareButton.style.pointerEvents = "";
+        let dataStr = JSON.stringify(shareNotebookData);
+        let encoded = btoa(unescape(encodeURIComponent(dataStr)));
 
-      try {
-        if (navigator.clipboard) {
-          await navigator.clipboard.writeText(text);
-          alert(isReadOnlyMode ? "只读链接已复制" : "只读分享链接已复制，可发送给他人打开");
-        } else if (navigator.share) {
-          await navigator.share({ title: notebook.name, text });
-        } else {
-          alert(text);
+        const MAX_ENCODED = 2000000;
+        let imagesStripped = false;
+        if (encoded.length > MAX_ENCODED) {
+          const lite = JSON.parse(JSON.stringify(shareNotebookData));
+          lite.entries = (lite.entries || []).map((e) => ({ ...e, images: [] }));
+          dataStr = JSON.stringify(lite);
+          encoded = btoa(unescape(encodeURIComponent(dataStr)));
+          imagesStripped = true;
         }
-      } catch {
-        alert(text);
+
+        url.searchParams.set("data", encoded);
+        const longUrl = url.toString();
+
+        let text = longUrl;
+        let shortened = false;
+        try {
+          const shortUrl = await shortenUrl(longUrl);
+          if (shortUrl) {
+            text = shortUrl;
+            shortened = true;
+          }
+        } catch {}
+
+        shareButton.textContent = originalLabel;
+        shareButton.style.pointerEvents = "";
+
+        let msg = isReadOnlyMode ? "只读链接已复制" : "只读分享链接已复制，可发送给他人打开";
+        if (imagesStripped) {
+          msg += "\n\n（提示：故事本图片较多，分享链接中未包含图片。如需分享图片，建议减少条目图片数量）";
+        }
+        if (!shortened) {
+          msg += "\n（链接较长，请直接复制完整链接发送）";
+        }
+
+        try {
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+            alert(msg);
+          } else if (navigator.share) {
+            await navigator.share({ title: notebook.name, text });
+          } else {
+            alert(text + "\n\n" + msg);
+          }
+        } catch {
+          alert(text + "\n\n" + msg);
+        }
+      } catch (e) {
+        shareButton.textContent = originalLabel;
+        shareButton.style.pointerEvents = "";
+        alert("生成分享链接失败，请重试");
       }
     }
 
