@@ -185,6 +185,19 @@
     }
     .share-error-button:hover { background: #b89776; }
 
+    .share-loading-spinner {
+      width: 40px;
+      height: 40px;
+      margin: 0 auto 20px;
+      border: 3px solid rgba(201, 168, 138, 0.3);
+      border-top-color: #c9a88a;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
     #registerPage {
       display: grid;
       place-items: center;
@@ -2022,6 +2035,14 @@
   </style>
 </head>
 <body>
+  <section id="shareLoadingPage" class="page" aria-label="加载中">
+    <div class="share-error-wrap">
+      <div class="share-loading-spinner"></div>
+      <h2 class="share-error-title">正在加载故事本…</h2>
+      <p class="share-error-desc">请稍候，马上就好</p>
+    </div>
+  </section>
+
   <section id="shareErrorPage" class="page" aria-label="分享链接无效">
     <div class="share-error-wrap">
       <div class="share-error-icon">📖</div>
@@ -2236,7 +2257,8 @@
       register: document.getElementById("registerPage"),
       home: document.getElementById("homePage"),
       detail: document.getElementById("detailPage"),
-      shareError: document.getElementById("shareErrorPage")
+      shareError: document.getElementById("shareErrorPage"),
+      shareLoading: document.getElementById("shareLoadingPage")
     };
 
     const shareErrorBackButton = document.getElementById("shareErrorBackButton");
@@ -2936,8 +2958,9 @@
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
         if (entry.images && entry.images.length) {
+          // 分享用更小尺寸和更低质量，确保云端上传成功
           const compressed = await Promise.all(
-            entry.images.map((img) => compressDataUrl(img, 350, 0.5))
+            entry.images.map((img) => compressDataUrl(img, 280, 0.4))
           );
           entry.images = compressed;
         }
@@ -3033,33 +3056,159 @@
 
     async function shortenUrl(longUrl) {
       const encoded = encodeURIComponent(longUrl);
-      const tryFetch = async (serviceUrl) => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        try {
-          const resp = await fetch(serviceUrl, { signal: controller.signal, mode: "cors" });
-          clearTimeout(timeoutId);
-          if (resp.ok) {
-            const short = (await resp.text()).trim();
-            if (short.startsWith("http")) return short;
-          }
-        } catch { clearTimeout(timeoutId); }
-        return null;
-      };
       const services = [
         "https://is.gd/create.php?format=simple&url=" + encoded,
-        "https://tinyurl.com/api-create.php?url=" + encoded
+        "https://tinyurl.com/api-create.php?url=" + encoded,
+        "https://api.shrtco.de/v2/shorten?url=" + encoded
       ];
-      return new Promise((resolve) => {
-        let done = false;
-        let pending = services.length;
-        services.forEach(async (url) => {
-          const result = await tryFetch(url);
-          if (done) return;
-          if (result) { done = true; resolve(result); }
-          else if (--pending === 0) resolve(null);
+
+      for (let i = 0; i < services.length; i++) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 4000);
+          const resp = await fetch(services[i], { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (resp.ok) {
+            const text = (await resp.text()).trim();
+            // shrtco.de 返回 JSON
+            if (text.startsWith("{")) {
+              try {
+                const data = JSON.parse(text);
+                if (data.ok && data.result?.short_link) {
+                  return "https://" + data.result.short_link;
+                }
+              } catch {}
+            } else if (text.startsWith("http")) {
+              return text;
+            }
+          }
+        } catch {}
+      }
+      return null;
+    }
+
+    // CORS 代理列表（按优先级排序）
+    const CORS_PROXIES = [
+      { post: "https://api.allorigins.win/post?url=", raw: "https://api.allorigins.win/raw?url=" },
+      { post: "https://corsproxy.io/?", raw: "https://corsproxy.io?" },
+      { post: "https://api.codetabs.com/v1/proxy?quest=", raw: "https://api.codetabs.com/v1/proxy?quest=" }
+    ];
+
+    // 通过 CORS 代理 POST 请求
+    async function corsPost(url, body, timeoutMs) {
+      for (let i = 0; i < CORS_PROXIES.length; i++) {
+        const proxy = CORS_PROXIES[i];
+        const targetUrl = proxy.post + encodeURIComponent(url);
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+          const resp = await fetch(targetUrl, { method: "POST", body: body, signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (resp.ok) return await resp.text();
+        } catch {}
+      }
+      return null;
+    }
+
+    // 通过 CORS 代理 GET 请求
+    async function corsGet(url, timeoutMs) {
+      // 先尝试直连（部分服务支持 CORS）
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs / 2);
+        const resp = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (resp.ok) return await resp.text();
+      } catch {}
+
+      // 再尝试各 CORS 代理
+      for (let i = 0; i < CORS_PROXIES.length; i++) {
+        const proxy = CORS_PROXIES[i];
+        const targetUrl = proxy.raw + encodeURIComponent(url);
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+          const resp = await fetch(targetUrl, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (resp.ok) return await resp.text();
+        } catch {}
+      }
+      return null;
+    }
+
+    // 将数据上传到云端 paste 服务，返回 { service, id }
+    async function uploadToPaste(jsonStr) {
+      // 方案1: dpaste.com（原生支持 CORS，最可靠）
+      try {
+        const form = new FormData();
+        form.append("content", jsonStr);
+        form.append("syntax", "text");
+        form.append("expiry_days", "365");
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const resp = await fetch("https://dpaste.com/api/v2/", {
+          method: "POST",
+          body: form,
+          signal: controller.signal
         });
-      });
+        clearTimeout(timeoutId);
+        if (resp.ok) {
+          const text = await resp.text();
+          const match = text.match(/dpaste\.com\/([A-Za-z0-9]+)/);
+          if (match) return { service: "dpaste", id: match[1] };
+        }
+      } catch {}
+
+      // 方案2: paste.rs（直连，速度快，部分浏览器可能 CORS 受限）
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch("https://paste.rs/", {
+          method: "POST",
+          body: jsonStr,
+          headers: { "Content-Type": "text/plain" },
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (resp.ok) {
+          const text = await resp.text();
+          const idMatch = text.trim().match(/\/([A-Za-z0-9]+)\/?$/);
+          if (idMatch) return { service: "paster", id: idMatch[1] };
+        }
+      } catch {}
+
+      // 方案3: 通过 CORS 代理上传到 dpaste.org（备选）
+      try {
+        const form = new FormData();
+        form.append("content", jsonStr);
+        form.append("syntax", "text");
+        form.append("expiry_days", "365");
+        const result = await corsPost("https://dpaste.org/api/", form, 10000);
+        if (result) {
+          const match = result.match(/dpaste\.org\/([A-Za-z0-9]+)/);
+          if (match) return { service: "dpasteorg", id: match[1] };
+        }
+      } catch {}
+
+      return null;
+    }
+
+    // 从云端 paste 服务拉取数据
+    async function fetchFromPaste(service, id) {
+      let rawUrl = "";
+      if (service === "dpaste") {
+        rawUrl = "https://dpaste.com/" + id + ".txt";
+      } else if (service === "paster") {
+        rawUrl = "https://paste.rs/" + id;
+      } else if (service === "dpasteorg") {
+        rawUrl = "https://dpaste.org/raw/" + id;
+      } else if (service === "0x0") {
+        rawUrl = "https://0x0.st/" + id;
+      } else if (service === "envs") {
+        rawUrl = "https://envs.sh/" + id;
+      }
+      if (!rawUrl) return null;
+      return await corsGet(rawUrl, 10000);
     }
 
     async function shareNotebook() {
@@ -3067,28 +3216,28 @@
       if (!notebook) return;
 
       const originalLabel = shareButton.textContent;
-      shareButton.textContent = "⏳";
+      shareButton.textContent = "生成中…";
       shareButton.style.pointerEvents = "none";
 
       try {
-        const NEED_COMPRESS = 150000;
-        const MAX_ENCODED = 1500000;
+        const MAX_FOR_CLOUD = 400000; // 云端上传最大体积（约400KB JSON）
 
-        let shareNotebookData = notebook;
+        // 先压缩图片（云端分享始终压缩，确保成功率）
+        let shareNotebookData = await prepareNotebookForShare(notebook);
         let imagesStripped = false;
 
-        // 先估算，数据较大时压缩图片
-        const rawStr = JSON.stringify(notebook);
-        const rawLen = toBase64Url(rawStr).length;
-        if (rawLen > NEED_COMPRESS) {
-          shareNotebookData = await prepareNotebookForShare(notebook);
-        }
-
-        // 精简字段：去掉不需要分享的字段以缩短链接
+        // 精简字段
         const slim = JSON.parse(JSON.stringify(shareNotebookData));
         delete slim.shareToken;
         delete slim.updatedAt;
+        delete slim.createdAt;
         if (slim.importantDates && slim.importantDates.length === 0) delete slim.importantDates;
+        if (slim.importantDates) {
+          slim.importantDates = slim.importantDates.map(d => ({
+            d: d.date,
+            desc: d.description
+          }));
+        }
         if (slim.entries) {
           slim.entries = slim.entries.map((e) => {
             const o = { t: e.text || "" };
@@ -3097,59 +3246,92 @@
             return o;
           });
         }
+        // 精简本子名称和封面字段
+        slim.n = slim.name;
+        slim.c = slim.coverColor;
+        delete slim.name;
+        delete slim.coverColor;
 
         let dataStr = JSON.stringify(slim);
-        let encoded = toBase64Url(dataStr);
 
-        if (encoded.length > MAX_ENCODED) {
+        // 数据过大时剥离图片
+        if (dataStr.length > MAX_FOR_CLOUD) {
           const lite = JSON.parse(JSON.stringify(slim));
-          lite.entries = (lite.entries || []).map((e) => ({ t: e.t || "" }));
+          lite.entries = (lite.entries || []).map((e) => ({ t: e.t || "", d: e.d }));
           dataStr = JSON.stringify(lite);
-          encoded = toBase64Url(dataStr);
           imagesStripped = true;
         }
 
-        const url = new URL(window.location.href);
-        url.search = "";
-        url.hash = "";
-        url.searchParams.set("d", encoded);
-        const longUrl = url.toString();
+        // 上传到云端 paste 服务
+        shareButton.textContent = "上传中…";
+        const pasteResult = await uploadToPaste(dataStr);
 
-        // 立即复制长链接
-        try {
-          if (navigator.clipboard) {
-            await navigator.clipboard.writeText(longUrl);
+        const baseUrl = new URL(window.location.href);
+        baseUrl.search = "";
+        baseUrl.hash = "";
+
+        let shareUrl;
+        let isShortLink = false;
+
+        if (pasteResult) {
+          // 云端分享：链接只带服务标识和短ID
+          baseUrl.searchParams.set("p", pasteResult.service + ":" + pasteResult.id);
+          shareUrl = baseUrl.toString();
+
+          // 尝试用短链接服务进一步缩短（后台尝试，不阻塞主流程）
+          // 注意：云端分享链接本身已很短（约30-50字符），短链接为可选优化
+          (async () => {
+            try {
+              const shortUrl = await shortenUrl(shareUrl);
+              if (shortUrl) {
+                shareUrl = shortUrl;
+                isShortLink = true;
+                // 如果已经复制到剪贴板了，重新复制一次更短的
+                try {
+                  if (navigator.clipboard) {
+                    await navigator.clipboard.writeText(shareUrl);
+                  }
+                } catch {}
+              }
+            } catch {}
+          })();
+        } else {
+          // 云端上传失败，回退到 URL 直连方式
+          // 进一步压缩到 URL 能承载的大小
+          let finalData = dataStr;
+          if (toBase64Url(finalData).length > 2000) {
+            const ultraLite = { n: slim.n, c: slim.c, entries: (slim.entries || []).slice(0, 5).map(e => ({ t: e.t?.substring(0, 100) || "", d: e.d })) };
+            finalData = JSON.stringify(ultraLite);
+            imagesStripped = true;
           }
-        } catch {}
+          const encoded = toBase64Url(finalData);
+          baseUrl.searchParams.set("d", encoded);
+          shareUrl = baseUrl.toString();
+        }
 
         shareButton.textContent = originalLabel;
         shareButton.style.pointerEvents = "";
 
         let baseMsg = isReadOnlyMode ? "链接已复制" : "分享链接已复制，可发送给他人打开";
         if (imagesStripped) {
-          baseMsg += "\n\n（提示：图片较多，链接中不含图片。减少图片数量后再分享即可包含图片）";
+          baseMsg += "\n\n（提示：内容较多，链接中不含图片。减少内容或图片后再分享即可包含完整内容）";
+        }
+        if (pasteResult) {
+          baseMsg += "\n\n（云端分享模式，链接已大幅缩短）";
         }
 
-        if (navigator.clipboard) {
-          alert(baseMsg + "\n\n正在生成短链接…成功后自动更新");
-        } else if (navigator.share) {
-          try {
-            await navigator.share({ title: notebook.name, text: longUrl });
-          } catch { alert(longUrl + "\n\n" + baseMsg); }
-          return;
-        } else {
-          alert(longUrl + "\n\n" + baseMsg);
-          return;
-        }
-
-        // 后台尝试短链接
         try {
-          const shortUrl = await shortenUrl(longUrl);
-          if (shortUrl && navigator.clipboard) {
-            await navigator.clipboard.writeText(shortUrl);
-            showToast("短链接已生成并复制：" + shortUrl);
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(shareUrl);
+            alert(baseMsg);
+          } else if (navigator.share) {
+            await navigator.share({ title: notebook.name, text: shareUrl });
+          } else {
+            alert(shareUrl + "\n\n" + baseMsg);
           }
-        } catch {}
+        } catch {
+          alert(shareUrl + "\n\n" + baseMsg);
+        }
       } catch (e) {
         shareButton.textContent = originalLabel;
         shareButton.style.pointerEvents = "";
@@ -3397,6 +3579,17 @@
       }
       if (!jsonStr) return null;
       const parsed = JSON.parse(jsonStr);
+      // 兼容精简字段名
+      if (parsed.n) { parsed.name = parsed.n; delete parsed.n; }
+      if (parsed.c) { parsed.coverColor = parsed.c; delete parsed.c; }
+      if (parsed.importantDates && Array.isArray(parsed.importantDates)) {
+        parsed.importantDates = parsed.importantDates.map(d => ({
+          id: createId(),
+          date: d.date || d.d,
+          description: d.description || d.desc,
+          createdAt: new Date().toISOString()
+        }));
+      }
       // 兼容精简字段格式（t/i/d → text/images/date）
       if (parsed.entries && Array.isArray(parsed.entries)) {
         parsed.entries = parsed.entries.map((e) => ({
@@ -3414,6 +3607,18 @@
       saveAppData();
 
       const queryParams = new URLSearchParams(window.location.search);
+
+      // 云端分享模式: ?p=service:id
+      const pasteParam = queryParams.get("p");
+      if (pasteParam) {
+        const parts = pasteParam.split(":");
+        if (parts.length >= 2) {
+          loadSharedFromPaste(parts[0], parts.slice(1).join(":"));
+          return;
+        }
+      }
+
+      // URL 直连模式: ?d=... 或 ?data=...
       const sharedData = queryParams.get("d") || queryParams.get("data");
       if (sharedData) {
         try {
@@ -3457,6 +3662,71 @@
       } else {
         startSplash();
       }
+    }
+
+    async function loadSharedFromPaste(service, id) {
+      // 先显示加载状态
+      showPage("shareLoading");
+
+      // 最多重试 2 次
+      let jsonStr = null;
+      for (let attempt = 0; attempt < 2 && !jsonStr; attempt++) {
+        jsonStr = await fetchFromPaste(service, id);
+        if (!jsonStr && attempt === 0) {
+          // 第一次失败后稍等再重试
+          await new Promise(r => setTimeout(r, 800));
+        }
+      }
+
+      if (!jsonStr) {
+        showPage("shareError");
+        return;
+      }
+
+      try {
+        // 直接解析 JSON
+        const parsed = JSON.parse(jsonStr);
+        const nb = parseSharedNotebookFromObject(parsed);
+        if (nb && nb.id) {
+          const existingIdx = appData.notebooks.findIndex((n) => n.id === nb.id);
+          if (existingIdx === -1) {
+            appData.notebooks.push(nb);
+          }
+          isReadOnlyMode = true;
+          currentNotebookId = nb.id;
+          selectedEntryImages = [];
+          updateUserUI();
+          renderDetail();
+          showPage("detail");
+          return;
+        }
+      } catch (e) {
+        console.error("解析云端分享数据失败:", e);
+      }
+      showPage("shareError");
+    }
+
+    function parseSharedNotebookFromObject(parsed) {
+      // 兼容精简字段名
+      if (parsed.n) { parsed.name = parsed.n; delete parsed.n; }
+      if (parsed.c) { parsed.coverColor = parsed.c; delete parsed.c; }
+      if (parsed.importantDates && Array.isArray(parsed.importantDates)) {
+        parsed.importantDates = parsed.importantDates.map(d => ({
+          id: createId(),
+          date: d.date || d.d,
+          description: d.description || d.desc,
+          createdAt: new Date().toISOString()
+        }));
+      }
+      if (parsed.entries && Array.isArray(parsed.entries)) {
+        parsed.entries = parsed.entries.map((e) => ({
+          id: e.id || createId(),
+          text: e.text ?? e.t ?? "",
+          images: e.images || e.i || [],
+          date: e.date || e.d || new Date().toISOString().split("T")[0]
+        }));
+      }
+      return normalizeNotebook(parsed);
     }
 
     initializeApp();
