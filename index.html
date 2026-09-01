@@ -2117,8 +2117,6 @@
       <p id="sidebarGender" class="sidebar-gender">未选择性别</p>
       <div class="sidebar-divider"></div>
       <button id="exportDataButton" class="logout-button" type="button">📦 导出数据</button>
-      <button id="importDataButton" class="logout-button" type="button">📥 导入数据</button>
-      <input id="importDataInput" type="file" accept="application/json,.json" hidden />
       <button id="logoutButton" class="logout-button" type="button">退出登录</button>
     </aside>
   </div>
@@ -2198,8 +2196,6 @@
     const sidebarName = document.getElementById("sidebarName");
     const sidebarGender = document.getElementById("sidebarGender");
     const exportDataButton = document.getElementById("exportDataButton");
-    const importDataButton = document.getElementById("importDataButton");
-    const importDataInput = document.getElementById("importDataInput");
     const logoutButton = document.getElementById("logoutButton");
     const backHomeButton = document.getElementById("backHomeButton");
     const shareButton = document.getElementById("shareButton");
@@ -2301,8 +2297,10 @@
         if (appData.user) {
           localStorage.setItem(LEGACY_USER_KEY, JSON.stringify(appData.user));
         }
+        return true;
       } catch (e) {
         console.error("存储失败:", e);
+        return false;
       }
     }
 
@@ -2602,7 +2600,10 @@
       if (!notebook) return;
       mutator(notebook);
       notebook.updatedAt = new Date().toISOString();
-      saveAppData();
+      const saved = saveAppData();
+      if (!saved) {
+        alert("保存失败，浏览器存储空间可能不足，内容可能无法在下次访问时保留。请尝试减少图片数量。");
+      }
       renderNotebooks();
       renderDetail();
     }
@@ -2789,6 +2790,12 @@
       reader.readAsDataURL(file);
     }
 
+    function compressImageAsync(file, maxSize, quality) {
+      return new Promise((resolve) => {
+        compressImage(file, maxSize, quality, resolve);
+      });
+    }
+
     async function handleEntryImages() {
       const files = [...(entryImageInput.files || [])].filter((file) => file.type.startsWith("image/"));
       const remaining = Math.max(9 - selectedEntryImages.length, 0);
@@ -2798,7 +2805,7 @@
         return;
       }
       const picked = files.slice(0, remaining);
-      const images = await Promise.all(picked.map(readFileAsDataURL));
+      const images = (await Promise.all(picked.map((file) => compressImageAsync(file, 800, 0.7)))).filter(Boolean);
       selectedEntryImages.push(...images);
       if (files.length > remaining) alert("最多只能选择 9 张图片，已自动保留前 9 张");
       entryImageInput.value = "";
@@ -2972,43 +2979,6 @@
       link.remove();
     }
 
-    async function importDataFromFile(file) {
-      if (!file) return;
-      if (!confirm("导入会覆盖当前所有本地数据，确定继续吗？")) {
-        importDataInput.value = "";
-        return;
-      }
-
-      try {
-        const text = await file.text();
-        const parsed = JSON.parse(text);
-        const imported = parsed.data || parsed;
-        if (!imported?.user?.nickname || !Array.isArray(imported.notebooks)) {
-          throw new Error("数据格式不正确");
-        }
-
-        appData = {
-          user: {
-            avatar: imported.user.avatar || "",
-            nickname: imported.user.nickname || "",
-            gender: imported.user.gender || ""
-          },
-          notebooks: imported.notebooks.map(normalizeNotebook)
-        };
-        isReadOnlyMode = false;
-        currentNotebookId = "";
-        selectedEntryImages = [];
-        saveAppData();
-        closeSidebar();
-        renderHome();
-        alert("导入成功");
-      } catch (error) {
-        alert("导入失败，请选择有效的 JSON 备份文件");
-      } finally {
-        importDataInput.value = "";
-      }
-    }
-
     function renderColorPicker() {
       colorPicker.innerHTML = "";
       NOTEBOOK_COLORS.forEach((color) => {
@@ -3162,8 +3132,6 @@
     homeAvatarButton.addEventListener("click", openSidebar);
     shareButton.addEventListener("click", shareNotebook);
     exportDataButton.addEventListener("click", exportData);
-    importDataButton.addEventListener("click", () => importDataInput.click());
-    importDataInput.addEventListener("change", () => importDataFromFile(importDataInput.files?.[0]));
     entryImageButton.addEventListener("click", () => entryImageInput.click());
     entryImageInput.addEventListener("change", handleEntryImages);
     publishEntryButton.addEventListener("click", publishEntry);
