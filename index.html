@@ -1213,6 +1213,32 @@
       font-size: 22px;
     }
 
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 40px;
+      transform: translateX(-50%) translateY(20px);
+      padding: 12px 22px;
+      background: rgba(90, 78, 68, 0.92);
+      color: #fff8ee;
+      border-radius: 24px;
+      font-size: 14px;
+      line-height: 1.5;
+      max-width: 80vw;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease, transform 0.3s ease;
+      z-index: 9999;
+      white-space: pre-line;
+      text-align: center;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
     /* 参考图风格覆盖：奶油手账、中心窄屏、柔和卡片 */
     :root {
       --warm-bg: #f7f3ec;
@@ -2150,6 +2176,8 @@
     <img id="lightboxImage" class="lightbox-image" alt="放大的记录图片" />
   </div>
 
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
   <script>
     const DATA_KEY = "withTAAppData";
     const LEGACY_USER_KEY = "withTAUser";
@@ -2223,6 +2251,7 @@
     const lightboxOverlay = document.getElementById("lightboxOverlay");
     const lightboxImage = document.getElementById("lightboxImage");
     const lightboxCloseButton = document.getElementById("lightboxCloseButton");
+    const toastEl = document.getElementById("toast");
 
     let appData = { user: null, notebooks: [] };
     let selectedGender = "";
@@ -2483,6 +2512,18 @@
       window.setTimeout(() => {
         target.classList.remove("show");
       }, 2200);
+    }
+
+    let toastTimer = null;
+    function showToast(message) {
+      if (!toastEl) return;
+      toastEl.textContent = message;
+      toastEl.classList.add("show");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toastEl.classList.remove("show");
+        toastTimer = null;
+      }, 3000);
     }
 
     function selectGender(gender) {
@@ -2934,7 +2975,7 @@
       const encoded = encodeURIComponent(longUrl);
       const tryFetch = async (serviceUrl) => {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
         try {
           const resp = await fetch(serviceUrl, { signal: controller.signal, mode: "cors" });
           clearTimeout(timeoutId);
@@ -2947,9 +2988,7 @@
       };
       const services = [
         "https://is.gd/create.php?format=simple&url=" + encoded,
-        "https://tinyurl.com/api-create.php?url=" + encoded,
-        "https://ulvis.net/api.php?url=" + encoded,
-        "https://cutt.ly/api/api.php?key=free&short=" + encoded
+        "https://tinyurl.com/api-create.php?url=" + encoded
       ];
       return new Promise((resolve) => {
         let done = false;
@@ -2972,7 +3011,19 @@
       shareButton.style.pointerEvents = "none";
 
       try {
-        const shareNotebookData = await prepareNotebookForShare(notebook);
+        // 先估算原始数据大小，不大的话跳过压缩以节省时间
+        const rawDataStr = JSON.stringify(notebook);
+        const rawEncoded = btoa(unescape(encodeURIComponent(rawDataStr)));
+        const NEED_COMPRESS = 200000;
+        const MAX_ENCODED = 2000000;
+
+        let shareNotebookData = notebook;
+        let imagesStripped = false;
+
+        if (rawEncoded.length > NEED_COMPRESS) {
+          shareNotebookData = await prepareNotebookForShare(notebook);
+        }
+
         const url = new URL(window.location.href);
         url.search = "";
         url.hash = "";
@@ -2980,8 +3031,6 @@
         let dataStr = JSON.stringify(shareNotebookData);
         let encoded = btoa(unescape(encodeURIComponent(dataStr)));
 
-        const MAX_ENCODED = 2000000;
-        let imagesStripped = false;
         if (encoded.length > MAX_ENCODED) {
           const lite = JSON.parse(JSON.stringify(shareNotebookData));
           lite.entries = (lite.entries || []).map((e) => ({ ...e, images: [] }));
@@ -2993,39 +3042,43 @@
         url.searchParams.set("data", encoded);
         const longUrl = url.toString();
 
-        let text = longUrl;
-        let shortened = false;
+        // 立即复制长链接，不让用户等待
         try {
-          const shortUrl = await shortenUrl(longUrl);
-          if (shortUrl) {
-            text = shortUrl;
-            shortened = true;
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(longUrl);
           }
         } catch {}
 
         shareButton.textContent = originalLabel;
         shareButton.style.pointerEvents = "";
 
-        let msg = isReadOnlyMode ? "只读链接已复制" : "只读分享链接已复制，可发送给他人打开";
+        let baseMsg = isReadOnlyMode ? "链接已复制" : "分享链接已复制，可发送给他人打开";
         if (imagesStripped) {
-          msg += "\n\n（提示：故事本图片较多，分享链接中未包含图片。如需分享图片，建议减少条目图片数量）";
-        }
-        if (!shortened) {
-          msg += "\n（链接较长，请直接复制完整链接发送）";
+          baseMsg += "\n\n（提示：故事本图片较多，分享链接中未包含图片。如需分享图片，建议减少条目图片数量）";
         }
 
-        try {
-          if (navigator.clipboard) {
-            await navigator.clipboard.writeText(text);
-            alert(msg);
-          } else if (navigator.share) {
-            await navigator.share({ title: notebook.name, text });
-          } else {
-            alert(text + "\n\n" + msg);
-          }
-        } catch {
-          alert(text + "\n\n" + msg);
+        // 先提示用户链接已复制
+        if (navigator.clipboard) {
+          alert(baseMsg + "\n\n正在尝试生成更短的链接…如成功会自动更新剪贴板");
+        } else if (navigator.share) {
+          try {
+            await navigator.share({ title: notebook.name, text: longUrl });
+          } catch { alert(longUrl + "\n\n" + baseMsg); }
+          return;
+        } else {
+          alert(longUrl + "\n\n" + baseMsg);
+          return;
         }
+
+        // 后台尝试生成短链接，成功则更新剪贴板
+        try {
+          const shortUrl = await shortenUrl(longUrl);
+          if (shortUrl && navigator.clipboard) {
+            await navigator.clipboard.writeText(shortUrl);
+            const finalMsg = "短链接已生成并更新到剪贴板：\n" + shortUrl;
+            showToast(finalMsg);
+          }
+        } catch {}
       } catch (e) {
         shareButton.textContent = originalLabel;
         shareButton.style.pointerEvents = "";
