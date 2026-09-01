@@ -149,6 +149,42 @@
       transform: translate(-50%, 0);
     }
 
+    .share-error-wrap {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      padding: 40px 28px;
+      max-width: 360px;
+      width: 88%;
+    }
+    .share-error-icon { font-size: 56px; margin-bottom: 16px; }
+    .share-error-title {
+      font-size: 20px;
+      color: #6b5b4e;
+      margin-bottom: 12px;
+      letter-spacing: 0.06em;
+    }
+    .share-error-desc {
+      font-size: 14px;
+      color: #8a7a6c;
+      line-height: 1.7;
+      margin-bottom: 28px;
+    }
+    .share-error-button {
+      padding: 12px 36px;
+      border: none;
+      border-radius: 24px;
+      background: #c9a88a;
+      color: #fff8ee;
+      font-size: 15px;
+      cursor: pointer;
+      letter-spacing: 0.1em;
+      transition: background 0.2s;
+    }
+    .share-error-button:hover { background: #b89776; }
+
     #registerPage {
       display: grid;
       place-items: center;
@@ -1986,6 +2022,15 @@
   </style>
 </head>
 <body>
+  <section id="shareErrorPage" class="page" aria-label="分享链接无效">
+    <div class="share-error-wrap">
+      <div class="share-error-icon">📖</div>
+      <h2 class="share-error-title">分享链接无法打开</h2>
+      <p class="share-error-desc">链接可能已损坏或不完整，请向分享者重新获取完整链接。</p>
+      <button id="shareErrorBackButton" class="share-error-button" type="button">返回首页</button>
+    </div>
+  </section>
+
   <main id="splashPage" class="page">
     <canvas id="splashCanvas" aria-hidden="true"></canvas>
     <div class="splash-book-icon" aria-hidden="true">
@@ -2190,9 +2235,11 @@
       splash: document.getElementById("splashPage"),
       register: document.getElementById("registerPage"),
       home: document.getElementById("homePage"),
-      detail: document.getElementById("detailPage")
+      detail: document.getElementById("detailPage"),
+      shareError: document.getElementById("shareErrorPage")
     };
 
+    const shareErrorBackButton = document.getElementById("shareErrorBackButton");
     const canvas = document.getElementById("splashCanvas");
     const ctx = canvas.getContext("2d");
     const registerBgCanvas = document.getElementById("registerBgCanvas");
@@ -2276,6 +2323,19 @@
       } catch {
         return null;
       }
+    }
+
+    function toBase64Url(str) {
+      return btoa(unescape(encodeURIComponent(str)))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+    }
+
+    function fromBase64Url(b64url) {
+      let b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      return decodeURIComponent(escape(atob(b64)));
     }
 
     function normalizeNotebook(notebook) {
@@ -2877,7 +2937,7 @@
         const entry = entries[i];
         if (entry.images && entry.images.length) {
           const compressed = await Promise.all(
-            entry.images.map((img) => compressDataUrl(img, 500, 0.6))
+            entry.images.map((img) => compressDataUrl(img, 350, 0.5))
           );
           entry.images = compressed;
         }
@@ -3011,38 +3071,51 @@
       shareButton.style.pointerEvents = "none";
 
       try {
-        // 先估算原始数据大小，不大的话跳过压缩以节省时间
-        const rawDataStr = JSON.stringify(notebook);
-        const rawEncoded = btoa(unescape(encodeURIComponent(rawDataStr)));
-        const NEED_COMPRESS = 200000;
-        const MAX_ENCODED = 2000000;
+        const NEED_COMPRESS = 150000;
+        const MAX_ENCODED = 1500000;
 
         let shareNotebookData = notebook;
         let imagesStripped = false;
 
-        if (rawEncoded.length > NEED_COMPRESS) {
+        // 先估算，数据较大时压缩图片
+        const rawStr = JSON.stringify(notebook);
+        const rawLen = toBase64Url(rawStr).length;
+        if (rawLen > NEED_COMPRESS) {
           shareNotebookData = await prepareNotebookForShare(notebook);
+        }
+
+        // 精简字段：去掉不需要分享的字段以缩短链接
+        const slim = JSON.parse(JSON.stringify(shareNotebookData));
+        delete slim.shareToken;
+        delete slim.updatedAt;
+        if (slim.importantDates && slim.importantDates.length === 0) delete slim.importantDates;
+        if (slim.entries) {
+          slim.entries = slim.entries.map((e) => {
+            const o = { t: e.text || "" };
+            if (e.images && e.images.length) o.i = e.images;
+            if (e.date) o.d = e.date;
+            return o;
+          });
+        }
+
+        let dataStr = JSON.stringify(slim);
+        let encoded = toBase64Url(dataStr);
+
+        if (encoded.length > MAX_ENCODED) {
+          const lite = JSON.parse(JSON.stringify(slim));
+          lite.entries = (lite.entries || []).map((e) => ({ t: e.t || "" }));
+          dataStr = JSON.stringify(lite);
+          encoded = toBase64Url(dataStr);
+          imagesStripped = true;
         }
 
         const url = new URL(window.location.href);
         url.search = "";
         url.hash = "";
-
-        let dataStr = JSON.stringify(shareNotebookData);
-        let encoded = btoa(unescape(encodeURIComponent(dataStr)));
-
-        if (encoded.length > MAX_ENCODED) {
-          const lite = JSON.parse(JSON.stringify(shareNotebookData));
-          lite.entries = (lite.entries || []).map((e) => ({ ...e, images: [] }));
-          dataStr = JSON.stringify(lite);
-          encoded = btoa(unescape(encodeURIComponent(dataStr)));
-          imagesStripped = true;
-        }
-
-        url.searchParams.set("data", encoded);
+        url.searchParams.set("d", encoded);
         const longUrl = url.toString();
 
-        // 立即复制长链接，不让用户等待
+        // 立即复制长链接
         try {
           if (navigator.clipboard) {
             await navigator.clipboard.writeText(longUrl);
@@ -3054,12 +3127,11 @@
 
         let baseMsg = isReadOnlyMode ? "链接已复制" : "分享链接已复制，可发送给他人打开";
         if (imagesStripped) {
-          baseMsg += "\n\n（提示：故事本图片较多，分享链接中未包含图片。如需分享图片，建议减少条目图片数量）";
+          baseMsg += "\n\n（提示：图片较多，链接中不含图片。减少图片数量后再分享即可包含图片）";
         }
 
-        // 先提示用户链接已复制
         if (navigator.clipboard) {
-          alert(baseMsg + "\n\n正在尝试生成更短的链接…如成功会自动更新剪贴板");
+          alert(baseMsg + "\n\n正在生成短链接…成功后自动更新");
         } else if (navigator.share) {
           try {
             await navigator.share({ title: notebook.name, text: longUrl });
@@ -3070,13 +3142,12 @@
           return;
         }
 
-        // 后台尝试生成短链接，成功则更新剪贴板
+        // 后台尝试短链接
         try {
           const shortUrl = await shortenUrl(longUrl);
           if (shortUrl && navigator.clipboard) {
             await navigator.clipboard.writeText(shortUrl);
-            const finalMsg = "短链接已生成并更新到剪贴板：\n" + shortUrl;
-            showToast(finalMsg);
+            showToast("短链接已生成并复制：" + shortUrl);
           }
         } catch {}
       } catch (e) {
@@ -3254,6 +3325,13 @@
       window.setTimeout(() => nicknameInput.focus(), 320);
     });
 
+    shareErrorBackButton.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      url.search = "";
+      url.hash = "";
+      window.location.href = url.toString();
+    });
+
     createNotebookButton.addEventListener("click", openCreateModal);
     cancelCreateButton.addEventListener("click", closeCreateModal);
     confirmCreateButton.addEventListener("click", createNotebook);
@@ -3306,16 +3384,40 @@
 
     window.addEventListener("resize", resizeCanvas);
 
+    function parseSharedNotebook(encoded) {
+      let jsonStr = null;
+      try {
+        jsonStr = fromBase64Url(encoded);
+      } catch {
+        try {
+          jsonStr = decodeURIComponent(escape(atob(encoded)));
+        } catch {
+          return null;
+        }
+      }
+      if (!jsonStr) return null;
+      const parsed = JSON.parse(jsonStr);
+      // 兼容精简字段格式（t/i/d → text/images/date）
+      if (parsed.entries && Array.isArray(parsed.entries)) {
+        parsed.entries = parsed.entries.map((e) => ({
+          id: e.id || createId(),
+          text: e.text ?? e.t ?? "",
+          images: e.images || e.i || [],
+          date: e.date || e.d || new Date().toISOString().split("T")[0]
+        }));
+      }
+      return normalizeNotebook(parsed);
+    }
+
     function initializeApp() {
       appData = loadAppData();
       saveAppData();
 
       const queryParams = new URLSearchParams(window.location.search);
-      const sharedData = queryParams.get("data");
+      const sharedData = queryParams.get("d") || queryParams.get("data");
       if (sharedData) {
         try {
-          const decoded = decodeURIComponent(escape(atob(sharedData)));
-          const sharedNotebook = normalizeNotebook(JSON.parse(decoded));
+          const sharedNotebook = parseSharedNotebook(sharedData);
           if (sharedNotebook && sharedNotebook.id) {
             const existingIdx = appData.notebooks.findIndex((n) => n.id === sharedNotebook.id);
             if (existingIdx === -1) {
@@ -3332,6 +3434,8 @@
         } catch (e) {
           console.error("解析分享数据失败:", e);
         }
+        showPage("shareError");
+        return;
       }
 
       if (routeToken) {
