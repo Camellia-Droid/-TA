@@ -2889,7 +2889,7 @@
         dataStr = JSON.stringify(lite);
         encoded = btoa(unescape(encodeURIComponent(dataStr)));
       }
-      url.hash = "data=" + encoded;
+      url.searchParams.set("data", encoded);
       const text = url.toString();
       try {
         if (navigator.clipboard) {
@@ -3168,8 +3168,8 @@
       appData = loadAppData();
       saveAppData();
 
-      const hashParams = new URLSearchParams(window.location.hash.slice(1));
-      const sharedData = hashParams.get("data");
+      const queryParams = new URLSearchParams(window.location.search);
+      const sharedData = queryParams.get("data");
       if (sharedData) {
         try {
           const decoded = decodeURIComponent(escape(atob(sharedData)));
