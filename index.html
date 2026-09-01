@@ -2875,6 +2875,37 @@
       lightboxImage.removeAttribute("src");
     }
 
+    async function shortenUrl(longUrl) {
+      const encoded = encodeURIComponent(longUrl);
+      const tryFetch = async (serviceUrl) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        try {
+          const resp = await fetch(serviceUrl, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (resp.ok) {
+            const short = (await resp.text()).trim();
+            if (short.startsWith("http")) return short;
+          }
+        } catch { clearTimeout(timeoutId); }
+        return null;
+      };
+      const services = [
+        "https://is.gd/create.php?format=simple&url=" + encoded,
+        "https://tinyurl.com/api-create.php?url=" + encoded
+      ];
+      return new Promise((resolve) => {
+        let done = false;
+        let pending = services.length;
+        services.forEach(async (url) => {
+          const result = await tryFetch(url);
+          if (done) return;
+          if (result) { done = true; resolve(result); }
+          else if (--pending === 0) resolve(null);
+        });
+      });
+    }
+
     async function shareNotebook() {
       const notebook = getCurrentNotebook();
       if (!notebook) return;
@@ -2890,7 +2921,21 @@
         encoded = btoa(unescape(encodeURIComponent(dataStr)));
       }
       url.searchParams.set("data", encoded);
-      const text = url.toString();
+      const longUrl = url.toString();
+
+      const originalLabel = shareButton.textContent;
+      shareButton.textContent = "⏳";
+      shareButton.style.pointerEvents = "none";
+
+      let text = longUrl;
+      try {
+        const shortUrl = await shortenUrl(longUrl);
+        if (shortUrl) text = shortUrl;
+      } catch {}
+
+      shareButton.textContent = originalLabel;
+      shareButton.style.pointerEvents = "";
+
       try {
         if (navigator.clipboard) {
           await navigator.clipboard.writeText(text);
