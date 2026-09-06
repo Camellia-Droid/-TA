@@ -1111,6 +1111,183 @@
       color: var(--warm-danger);
     }
 
+    .entry-footer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--warm-border-light);
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .comment-toggle {
+      background: none;
+      border: none;
+      color: var(--warm-text-soft);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .comment-toggle:hover {
+      background: var(--warm-bg-soft);
+      color: var(--warm-primary);
+    }
+
+    .comment-toggle[aria-expanded="true"] {
+      color: var(--warm-primary);
+    }
+
+    .comments-section {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--warm-border-light);
+    }
+
+    .comments-list {
+      margin-bottom: 12px;
+    }
+
+    .comments-empty {
+      margin: 8px 0;
+      color: var(--warm-text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .comment-item {
+      display: flex;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--warm-border-light);
+    }
+
+    .comment-item:last-child {
+      border-bottom: none;
+    }
+
+    .comment-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--warm-primary), var(--warm-secondary));
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .comment-body {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .comment-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+
+    .comment-nickname {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--warm-text);
+    }
+
+    .comment-time {
+      font-size: 11px;
+      color: var(--warm-text-muted);
+    }
+
+    .comment-text {
+      margin: 0;
+      font-size: 13px;
+      color: var(--warm-text);
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .comment-form {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .comment-nickname-input {
+      width: 100%;
+      padding: 6px 10px;
+      border: 1px solid var(--warm-border);
+      border-radius: 8px;
+      font-size: 12px;
+      background: var(--warm-bg);
+      color: var(--warm-text);
+      box-sizing: border-box;
+      outline: none;
+      transition: border-color 0.2s ease;
+    }
+
+    .comment-nickname-input:focus {
+      border-color: var(--warm-primary);
+    }
+
+    .comment-input-row {
+      display: flex;
+      gap: 6px;
+      align-items: flex-end;
+    }
+
+    .comment-textarea {
+      flex: 1;
+      padding: 8px 10px;
+      border: 1px solid var(--warm-border);
+      border-radius: 8px;
+      font-size: 13px;
+      background: var(--warm-bg);
+      color: var(--warm-text);
+      resize: none;
+      outline: none;
+      font-family: inherit;
+      line-height: 1.5;
+      box-sizing: border-box;
+      transition: border-color 0.2s ease;
+      min-height: 36px;
+      max-height: 120px;
+    }
+
+    .comment-textarea:focus {
+      border-color: var(--warm-primary);
+    }
+
+    .comment-submit {
+      padding: 0 14px;
+      height: 36px;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--warm-primary), var(--warm-secondary));
+      color: white;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.2s ease, transform 0.1s ease;
+      flex-shrink: 0;
+    }
+
+    .comment-submit:hover {
+      opacity: 0.9;
+    }
+
+    .comment-submit:active {
+      transform: scale(0.96);
+    }
+
     .entry-content {
       margin: 0;
       color: var(--warm-text);
@@ -2800,6 +2977,7 @@
       entries.forEach((entry) => {
         const card = document.createElement("article");
         card.className = "entry-card";
+        const comments = entry.comments || [];
         card.innerHTML = `
           <header class="entry-header">
             <div class="entry-avatar">${appData.user?.avatar ? `<img src="${appData.user.avatar}" alt="我的头像" />` : avatarFallbackSvg(36)}</div>
@@ -2819,12 +2997,81 @@
               `).join("")}
             </div>
           ` : ""}
+          <footer class="entry-footer">
+            <button class="comment-toggle" type="button" data-entry-id="${entry.id}" aria-expanded="false">
+              💬 <span class="comment-count">${comments.length ? `${comments.length} 条评论` : "评论"}</span>
+            </button>
+          </footer>
+          <div class="comments-section" id="comments-${entry.id}" hidden>
+            <div class="comments-list">
+              ${comments.length === 0 ? `<p class="comments-empty">还没有评论，来说点什么吧～</p>` : comments.map(c => `
+                <div class="comment-item">
+                  <div class="comment-avatar">${escapeHtml((c.nickname || "匿名")[0])}</div>
+                  <div class="comment-body">
+                    <div class="comment-meta">
+                      <span class="comment-nickname">${escapeHtml(c.nickname || "匿名")}</span>
+                      <span class="comment-time">${relativeTime(c.createdAt)}</span>
+                    </div>
+                    <p class="comment-text">${escapeHtml(c.text || "")}</p>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+            <form class="comment-form" data-entry-id="${entry.id}">
+              <input type="text" class="comment-nickname-input" placeholder="你的昵称（选填）" maxlength="20" />
+              <div class="comment-input-row">
+                <textarea class="comment-textarea" placeholder="写下你的评论…" maxlength="200" rows="1"></textarea>
+                <button type="submit" class="comment-submit">发送</button>
+              </div>
+            </form>
+          </div>
         `;
 
         card.querySelector(".entry-delete")?.addEventListener("click", () => deleteEntry(entry.id));
         card.querySelectorAll(".entry-image-button").forEach((button) => {
           button.addEventListener("click", () => openLightbox(entry.images[Number(button.dataset.imageIndex)]));
         });
+
+        // 评论展开/收起
+        const toggleBtn = card.querySelector(".comment-toggle");
+        const commentsSection = card.querySelector(".comments-section");
+        toggleBtn.addEventListener("click", () => {
+          const expanded = toggleBtn.getAttribute("aria-expanded") === "true";
+          toggleBtn.setAttribute("aria-expanded", String(!expanded));
+          commentsSection.hidden = expanded;
+        });
+
+        // 评论提交
+        const commentForm = card.querySelector(".comment-form");
+        commentForm.addEventListener("submit", (e) => {
+          e.preventDefault();
+          const nicknameInput = commentForm.querySelector(".comment-nickname-input");
+          const textarea = commentForm.querySelector(".comment-textarea");
+          const text = textarea.value.trim();
+          if (!text) {
+            textarea.focus();
+            return;
+          }
+          const savedNickname = nicknameInput.value.trim() || "匿名";
+          addComment(entry.id, savedNickname, text);
+          // addComment 内部已调用 renderDetail，这里处理展开状态保持
+          setTimeout(() => {
+            const section = document.getElementById(`comments-${entry.id}`);
+            if (section) {
+              section.hidden = false;
+              const btn = document.querySelector(`.comment-toggle[data-entry-id="${entry.id}"]`);
+              if (btn) btn.setAttribute("aria-expanded", "true");
+            }
+          }, 0);
+        });
+
+        // 评论输入框自适应高度
+        const textarea = card.querySelector(".comment-textarea");
+        textarea.addEventListener("input", () => {
+          textarea.style.height = "auto";
+          textarea.style.height = Math.min(textarea.scrollHeight, 120) + "px";
+        });
+
         timeline.appendChild(card);
       });
     }
@@ -3012,6 +3259,27 @@
       saveCurrentNotebook((notebook) => {
         notebook.entries = (notebook.entries || []).filter((entry) => entry.id !== entryId);
       });
+    }
+
+    function addComment(entryId, nickname, text) {
+      const notebook = getCurrentNotebook();
+      if (!notebook) return;
+      const entry = (notebook.entries || []).find(e => e.id === entryId);
+      if (!entry) return;
+      if (!Array.isArray(entry.comments)) entry.comments = [];
+      entry.comments.push({
+        id: createId(),
+        nickname: nickname || "匿名",
+        text: text,
+        createdAt: new Date().toISOString()
+      });
+      // 只读模式下也保存评论到本地
+      notebook.updatedAt = new Date().toISOString();
+      const saved = saveAppData();
+      if (!saved && !isReadOnlyMode) {
+        alert("保存失败，浏览器存储空间可能不足，内容可能无法在下次访问时保留。");
+      }
+      renderDetail();
     }
 
     function addImportantDate() {
@@ -3243,6 +3511,14 @@
             const o = { t: e.text || "" };
             if (e.images && e.images.length) o.i = e.images;
             if (e.date) o.d = e.date;
+            // 评论数据：精简字段名
+            if (e.comments && e.comments.length) {
+              o.cs = e.comments.map(c => ({
+                n: c.nickname || "匿名",
+                x: c.text || "",
+                t: c.createdAt
+              }));
+            }
             return o;
           });
         }
@@ -3254,10 +3530,14 @@
 
         let dataStr = JSON.stringify(slim);
 
-        // 数据过大时剥离图片
+        // 数据过大时剥离图片（保留文字和评论）
         if (dataStr.length > MAX_FOR_CLOUD) {
           const lite = JSON.parse(JSON.stringify(slim));
-          lite.entries = (lite.entries || []).map((e) => ({ t: e.t || "", d: e.d }));
+          lite.entries = (lite.entries || []).map((e) => {
+            const o = { t: e.t || "", d: e.d };
+            if (e.cs && e.cs.length) o.cs = e.cs; // 保留评论
+            return o;
+          });
           dataStr = JSON.stringify(lite);
           imagesStripped = true;
         }
@@ -3300,7 +3580,11 @@
           // 进一步压缩到 URL 能承载的大小
           let finalData = dataStr;
           if (toBase64Url(finalData).length > 2000) {
-            const ultraLite = { n: slim.n, c: slim.c, entries: (slim.entries || []).slice(0, 5).map(e => ({ t: e.t?.substring(0, 100) || "", d: e.d })) };
+            const ultraLite = { n: slim.n, c: slim.c, entries: (slim.entries || []).slice(0, 5).map(e => {
+              const o = { t: e.t?.substring(0, 100) || "", d: e.d };
+              if (e.cs && e.cs.length) o.cs = e.cs.slice(0, 3); // 保留前3条评论
+              return o;
+            }) };
             finalData = JSON.stringify(ultraLite);
             imagesStripped = true;
           }
@@ -3592,12 +3876,27 @@
       }
       // 兼容精简字段格式（t/i/d → text/images/date）
       if (parsed.entries && Array.isArray(parsed.entries)) {
-        parsed.entries = parsed.entries.map((e) => ({
-          id: e.id || createId(),
-          text: e.text ?? e.t ?? "",
-          images: e.images || e.i || [],
-          date: e.date || e.d || new Date().toISOString().split("T")[0]
-        }));
+        parsed.entries = parsed.entries.map((e) => {
+          const entry = {
+            id: e.id || createId(),
+            text: e.text ?? e.t ?? "",
+            images: e.images || e.i || [],
+            date: e.date || e.d || new Date().toISOString().split("T")[0]
+          };
+          // 还原评论数据（精简格式 cs → comments）
+          if (e.cs && Array.isArray(e.cs)) {
+            entry.comments = e.cs.map(c => ({
+              id: createId(),
+              nickname: c.nickname || c.n || "匿名",
+              text: c.text || c.x || "",
+              createdAt: c.createdAt || c.t || new Date().toISOString()
+            }));
+          } else if (e.comments && Array.isArray(e.comments)) {
+            // 兼容未精简的格式
+            entry.comments = e.comments;
+          }
+          return entry;
+        });
       }
       return normalizeNotebook(parsed);
     }
@@ -3719,12 +4018,27 @@
         }));
       }
       if (parsed.entries && Array.isArray(parsed.entries)) {
-        parsed.entries = parsed.entries.map((e) => ({
-          id: e.id || createId(),
-          text: e.text ?? e.t ?? "",
-          images: e.images || e.i || [],
-          date: e.date || e.d || new Date().toISOString().split("T")[0]
-        }));
+        parsed.entries = parsed.entries.map((e) => {
+          const entry = {
+            id: e.id || createId(),
+            text: e.text ?? e.t ?? "",
+            images: e.images || e.i || [],
+            date: e.date || e.d || new Date().toISOString().split("T")[0]
+          };
+          // 还原评论数据（精简格式 cs → comments）
+          if (e.cs && Array.isArray(e.cs)) {
+            entry.comments = e.cs.map(c => ({
+              id: createId(),
+              nickname: c.nickname || c.n || "匿名",
+              text: c.text || c.x || "",
+              createdAt: c.createdAt || c.t || new Date().toISOString()
+            }));
+          } else if (e.comments && Array.isArray(e.comments)) {
+            // 兼容未精简的格式
+            entry.comments = e.comments;
+          }
+          return entry;
+        });
       }
       return normalizeNotebook(parsed);
     }
