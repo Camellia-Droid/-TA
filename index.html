@@ -1221,23 +1221,6 @@
       gap: 6px;
     }
 
-    .comment-nickname-input {
-      width: 100%;
-      padding: 6px 10px;
-      border: 1px solid var(--warm-border);
-      border-radius: 8px;
-      font-size: 12px;
-      background: var(--warm-bg);
-      color: var(--warm-text);
-      box-sizing: border-box;
-      outline: none;
-      transition: border-color 0.2s ease;
-    }
-
-    .comment-nickname-input:focus {
-      border-color: var(--warm-primary);
-    }
-
     .comment-input-row {
       display: flex;
       gap: 6px;
@@ -2564,6 +2547,14 @@
         };
       }
 
+      // 未注册用户（如通过分享链接进入的浏览者）也能加载已保存的笔记本（含评论）
+      if (saved && Array.isArray(saved.notebooks) && saved.notebooks.length > 0) {
+        return {
+          user: null,
+          notebooks: saved.notebooks.map(normalizeNotebook)
+        };
+      }
+
       const legacyUser = safeParse(localStorage.getItem(LEGACY_USER_KEY));
       if (legacyUser?.nickname) {
         return {
@@ -3006,10 +2997,10 @@
             <div class="comments-list">
               ${comments.length === 0 ? `<p class="comments-empty">还没有评论，来说点什么吧～</p>` : comments.map(c => `
                 <div class="comment-item">
-                  <div class="comment-avatar">${escapeHtml((c.nickname || "匿名")[0])}</div>
+                  <div class="comment-avatar">${escapeHtml((c.nickname || "访客")[0])}</div>
                   <div class="comment-body">
                     <div class="comment-meta">
-                      <span class="comment-nickname">${escapeHtml(c.nickname || "匿名")}</span>
+                      <span class="comment-nickname">${escapeHtml(c.nickname || "访客")}</span>
                       <span class="comment-time">${relativeTime(c.createdAt)}</span>
                     </div>
                     <p class="comment-text">${escapeHtml(c.text || "")}</p>
@@ -3018,10 +3009,9 @@
               `).join("")}
             </div>
             <form class="comment-form" data-entry-id="${entry.id}">
-              <input type="text" class="comment-nickname-input" placeholder="你的昵称（选填）" maxlength="20" />
               <div class="comment-input-row">
                 <textarea class="comment-textarea" placeholder="写下你的评论…" maxlength="200" rows="1"></textarea>
-                <button type="submit" class="comment-submit">发送</button>
+                <button type="submit" class="comment-submit">发布</button>
               </div>
             </form>
           </div>
@@ -3045,15 +3035,13 @@
         const commentForm = card.querySelector(".comment-form");
         commentForm.addEventListener("submit", (e) => {
           e.preventDefault();
-          const nicknameInput = commentForm.querySelector(".comment-nickname-input");
           const textarea = commentForm.querySelector(".comment-textarea");
           const text = textarea.value.trim();
           if (!text) {
             textarea.focus();
             return;
           }
-          const savedNickname = nicknameInput.value.trim() || "匿名";
-          addComment(entry.id, savedNickname, text);
+          addComment(entry.id, text);
           // addComment 内部已调用 renderDetail，这里处理展开状态保持
           setTimeout(() => {
             const section = document.getElementById(`comments-${entry.id}`);
@@ -3261,7 +3249,7 @@
       });
     }
 
-    function addComment(entryId, nickname, text) {
+    function addComment(entryId, text) {
       const notebook = getCurrentNotebook();
       if (!notebook) return;
       const entry = (notebook.entries || []).find(e => e.id === entryId);
@@ -3269,7 +3257,7 @@
       if (!Array.isArray(entry.comments)) entry.comments = [];
       entry.comments.push({
         id: createId(),
-        nickname: nickname || "匿名",
+        nickname: "访客",
         text: text,
         createdAt: new Date().toISOString()
       });
@@ -3926,7 +3914,32 @@
             const existingIdx = appData.notebooks.findIndex((n) => n.id === sharedNotebook.id);
             if (existingIdx === -1) {
               appData.notebooks.push(sharedNotebook);
+            } else {
+              // 合并评论
+              const localNb = appData.notebooks[existingIdx];
+              (sharedNotebook.entries || []).forEach((sharedEntry) => {
+                const localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+                if (localEntry) {
+                  const localComments = localEntry.comments || [];
+                  const sharedComments = sharedEntry.comments || [];
+                  const allComments = [...localComments];
+                  for (const sc of sharedComments) {
+                    const exists = localComments.some(lc =>
+                      lc.text === sc.text && lc.nickname === sc.nickname &&
+                      lc.createdAt === sc.createdAt
+                    );
+                    if (!exists) allComments.push(sc);
+                  }
+                  localEntry.comments = allComments;
+                  localEntry.text = sharedEntry.text;
+                  localEntry.images = sharedEntry.images;
+                } else {
+                  localNb.entries = localNb.entries || [];
+                  localNb.entries.push(sharedEntry);
+                }
+              });
             }
+            saveAppData();
             isReadOnlyMode = true;
             currentNotebookId = sharedNotebook.id;
             selectedEntryImages = [];
@@ -3989,8 +4002,39 @@
         if (nb && nb.id) {
           const existingIdx = appData.notebooks.findIndex((n) => n.id === nb.id);
           if (existingIdx === -1) {
+            // 本地没有该笔记本，直接添加
             appData.notebooks.push(nb);
+          } else {
+            // 本地已有该笔记本，合并评论：保留本地评论 + 加入云端新评论
+            const localNb = appData.notebooks[existingIdx];
+            (nb.entries || []).forEach((sharedEntry) => {
+              const localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+              if (localEntry) {
+                // 合并评论：本地评论 + 云端评论（去重）
+                const localComments = localEntry.comments || [];
+                const sharedComments = sharedEntry.comments || [];
+                const allComments = [...localComments];
+                for (const sc of sharedComments) {
+                  // 按内容+时间去重
+                  const exists = localComments.some(lc =>
+                    lc.text === sc.text && lc.nickname === sc.nickname &&
+                    lc.createdAt === sc.createdAt
+                  );
+                  if (!exists) allComments.push(sc);
+                }
+                localEntry.comments = allComments;
+                // 用分享版本的数据更新其他字段
+                localEntry.text = sharedEntry.text;
+                localEntry.images = sharedEntry.images;
+              } else {
+                // 本地没有这条 entry，从分享数据添加
+                localNb.entries = localNb.entries || [];
+                localNb.entries.push(sharedEntry);
+              }
+            });
           }
+          // 保存到 localStorage
+          saveAppData();
           isReadOnlyMode = true;
           currentNotebookId = nb.id;
           selectedEntryImages = [];
