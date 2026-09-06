@@ -3033,7 +3033,7 @@
 
         // 评论提交
         const commentForm = card.querySelector(".comment-form");
-        commentForm.addEventListener("submit", (e) => {
+        commentForm.addEventListener("submit", async (e) => {
           e.preventDefault();
           const textarea = commentForm.querySelector(".comment-textarea");
           const text = textarea.value.trim();
@@ -3041,7 +3041,13 @@
             textarea.focus();
             return;
           }
-          addComment(entry.id, text);
+          const submitBtn = commentForm.querySelector(".comment-submit");
+          const originalBtnText = submitBtn.textContent;
+          submitBtn.textContent = "发布中…";
+          submitBtn.disabled = true;
+          await addComment(entry.id, text);
+          submitBtn.textContent = originalBtnText;
+          submitBtn.disabled = false;
           // addComment 内部已调用 renderDetail，这里处理展开状态保持
           setTimeout(() => {
             const section = document.getElementById(`comments-${entry.id}`);
@@ -3249,7 +3255,7 @@
       });
     }
 
-    function addComment(entryId, text) {
+    async function addComment(entryId, text) {
       const notebook = getCurrentNotebook();
       if (!notebook) return;
       const entry = (notebook.entries || []).find(e => e.id === entryId);
@@ -3261,13 +3267,64 @@
         text: text,
         createdAt: new Date().toISOString()
       });
-      // 只读模式下也保存评论到本地
       notebook.updatedAt = new Date().toISOString();
       const saved = saveAppData();
       if (!saved && !isReadOnlyMode) {
-        alert("保存失败，浏览器存储空间可能不足，内容可能无法在下次访问时保留。");
+        alert("保存失败，浏览器存储空间可能不足。");
       }
       renderDetail();
+
+      // 只读模式下，自动将含评论的数据上传到云端，更新 URL
+      if (isReadOnlyMode) {
+        try {
+          const slim = JSON.parse(JSON.stringify(notebook));
+          delete slim.shareToken;
+          delete slim.updatedAt;
+          delete slim.createdAt;
+          if (slim.importantDates && slim.importantDates.length === 0) delete slim.importantDates;
+          if (slim.importantDates) {
+            slim.importantDates = slim.importantDates.map(d => ({ d: d.date, desc: d.description }));
+          }
+          if (slim.entries) {
+            slim.entries = slim.entries.map(e => {
+              const o = { id: e.id, t: e.text || "" };
+              if (e.images && e.images.length) o.i = e.images;
+              if (e.date) o.d = e.date;
+              if (e.comments && e.comments.length) {
+                o.cs = e.comments.map(c => ({ n: c.nickname || "访客", x: c.text || "", t: c.createdAt }));
+              }
+              return o;
+            });
+          }
+          slim.n = slim.name;
+          slim.c = slim.coverColor;
+          delete slim.name;
+          delete slim.coverColor;
+
+          let dataStr = JSON.stringify(slim);
+          if (dataStr.length > 400000) {
+            const lite = JSON.parse(JSON.stringify(slim));
+            lite.entries = (lite.entries || []).map(e => {
+              const o = { id: e.id, t: e.t || "", d: e.d };
+              if (e.cs && e.cs.length) o.cs = e.cs;
+              return o;
+            });
+            dataStr = JSON.stringify(lite);
+          }
+
+          const pasteResult = await uploadToPaste(dataStr);
+          if (pasteResult) {
+            const baseUrl = new URL(window.location.href);
+            baseUrl.search = "";
+            baseUrl.hash = "";
+            baseUrl.searchParams.set("p", pasteResult.service + ":" + pasteResult.id);
+            // 更新浏览器 URL，不刷新页面
+            window.history.replaceState({}, "", baseUrl.toString());
+          }
+        } catch (e) {
+          console.error("评论自动上传失败:", e);
+        }
+      }
     }
 
     function addImportantDate() {
@@ -3496,13 +3553,13 @@
         }
         if (slim.entries) {
           slim.entries = slim.entries.map((e) => {
-            const o = { t: e.text || "" };
+            const o = { id: e.id, t: e.text || "" };
             if (e.images && e.images.length) o.i = e.images;
             if (e.date) o.d = e.date;
             // 评论数据：精简字段名
             if (e.comments && e.comments.length) {
               o.cs = e.comments.map(c => ({
-                n: c.nickname || "匿名",
+                n: c.nickname || "访客",
                 x: c.text || "",
                 t: c.createdAt
               }));
@@ -3522,7 +3579,7 @@
         if (dataStr.length > MAX_FOR_CLOUD) {
           const lite = JSON.parse(JSON.stringify(slim));
           lite.entries = (lite.entries || []).map((e) => {
-            const o = { t: e.t || "", d: e.d };
+            const o = { id: e.id, t: e.t || "", d: e.d };
             if (e.cs && e.cs.length) o.cs = e.cs; // 保留评论
             return o;
           });
@@ -3569,7 +3626,7 @@
           let finalData = dataStr;
           if (toBase64Url(finalData).length > 2000) {
             const ultraLite = { n: slim.n, c: slim.c, entries: (slim.entries || []).slice(0, 5).map(e => {
-              const o = { t: e.t?.substring(0, 100) || "", d: e.d };
+              const o = { id: e.id, t: e.t?.substring(0, 100) || "", d: e.d };
               if (e.cs && e.cs.length) o.cs = e.cs.slice(0, 3); // 保留前3条评论
               return o;
             }) };
