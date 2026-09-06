@@ -2768,12 +2768,61 @@
     function showToast(message) {
       if (!toastEl) return;
       toastEl.textContent = message;
+      toastEl.innerHTML = "";
+      toastEl.textContent = message;
       toastEl.classList.add("show");
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         toastEl.classList.remove("show");
         toastTimer = null;
       }, 3000);
+    }
+
+    function showShareLinkToast(url) {
+      if (!toastEl) return;
+      toastEl.innerHTML = "";
+      const text = document.createElement("span");
+      text.textContent = "评论已发布，发给对方查看";
+      text.style.marginRight = "10px";
+      const btn = document.createElement("button");
+      btn.textContent = "复制链接";
+      btn.style.cssText = "background:rgba(255,255,255,0.25);color:#fff;border:none;padding:4px 12px;border-radius:12px;font-size:12px;cursor:pointer;margin-right:6px;";
+      btn.onclick = async () => {
+        try {
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(url);
+          } else {
+            const ta = document.createElement("textarea");
+            ta.value = url;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          }
+          btn.textContent = "已复制 ✓";
+          setTimeout(() => { btn.textContent = "复制链接"; }, 1500);
+        } catch {
+          btn.textContent = "复制失败";
+        }
+      };
+      toastEl.appendChild(text);
+      toastEl.appendChild(btn);
+      // 支持系统分享的设备额外显示分享按钮
+      if (navigator.share) {
+        const shareBtn = document.createElement("button");
+        shareBtn.textContent = "分享";
+        shareBtn.style.cssText = "background:rgba(255,255,255,0.25);color:#fff;border:none;padding:4px 12px;border-radius:12px;font-size:12px;cursor:pointer;";
+        shareBtn.onclick = () => {
+          navigator.share({ title: "故事本", url: url }).catch(() => {});
+        };
+        toastEl.appendChild(shareBtn);
+      }
+      toastEl.classList.add("show");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toastEl.classList.remove("show");
+        toastTimer = null;
+      }, 8000);
     }
 
     function selectGender(gender) {
@@ -3268,13 +3317,10 @@
         createdAt: new Date().toISOString()
       });
       notebook.updatedAt = new Date().toISOString();
-      const saved = saveAppData();
-      if (!saved && !isReadOnlyMode) {
-        alert("保存失败，浏览器存储空间可能不足。");
-      }
+      saveAppData();
       renderDetail();
 
-      // 只读模式下，自动将含评论的数据上传到云端，更新 URL
+      // 只读模式下，自动上传含评论的数据到云端，更新 URL
       if (isReadOnlyMode) {
         try {
           const slim = JSON.parse(JSON.stringify(notebook));
@@ -3318,12 +3364,18 @@
             baseUrl.search = "";
             baseUrl.hash = "";
             baseUrl.searchParams.set("p", pasteResult.service + ":" + pasteResult.id);
-            // 更新浏览器 URL，不刷新页面
-            window.history.replaceState({}, "", baseUrl.toString());
+            const newUrl = baseUrl.toString();
+            // 静默更新浏览器 URL，不刷新页面
+            window.history.replaceState({}, "", newUrl);
+            // 显示复制链接的 Toast
+            showShareLinkToast(newUrl);
+            return;
           }
         } catch (e) {
-          console.error("评论自动上传失败:", e);
+          console.error("评论上传失败:", e);
         }
+        // 上传失败也给个提示
+        showToast("评论已发布到本地");
       }
     }
 
@@ -3986,11 +4038,10 @@
                       lc.createdAt === sc.createdAt
                     );
                     if (!exists) allComments.push(sc);
-                  }
-                  localEntry.comments = allComments;
-                  localEntry.text = sharedEntry.text;
-                  localEntry.images = sharedEntry.images;
-                } else {
+                }
+                localEntry.comments = allComments;
+                // 不覆盖本地文字和图片，保留作者原始数据
+              } else {
                   localNb.entries = localNb.entries || [];
                   localNb.entries.push(sharedEntry);
                 }
@@ -4080,9 +4131,7 @@
                   if (!exists) allComments.push(sc);
                 }
                 localEntry.comments = allComments;
-                // 用分享版本的数据更新其他字段
-                localEntry.text = sharedEntry.text;
-                localEntry.images = sharedEntry.images;
+                // 不覆盖本地文字和图片，保留作者原始数据
               } else {
                 // 本地没有这条 entry，从分享数据添加
                 localNb.entries = localNb.entries || [];
