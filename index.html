@@ -2530,7 +2530,8 @@
         updatedAt: notebook.updatedAt || notebook.createdAt || now,
         entries: Array.isArray(notebook.entries) ? notebook.entries : [],
         importantDates: Array.isArray(notebook.importantDates) ? notebook.importantDates : [],
-        shareToken: notebook.shareToken || createShareToken()
+        shareToken: notebook.shareToken || createShareToken(),
+        commentBucketId: notebook.commentBucketId || ""
       };
     }
 
@@ -3320,13 +3321,29 @@
       saveAppData();
       renderDetail();
 
-      // 只读模式下，自动上传含评论的数据到云端，更新 URL
+      // 只读模式下，同步评论到云端
       if (isReadOnlyMode) {
+        // 优先使用 kvdb.io 评论同步
+        if (notebook.commentBucketId) {
+          try {
+            const commentsData = collectComments(notebook);
+            const uploaded = await uploadCommentsToBucket(notebook.commentBucketId, notebook.id, commentsData);
+            showToast(uploaded ? "评论已发布" : "评论已发布到本地");
+            return;
+          } catch (e) {
+            console.error("评论同步失败:", e);
+          }
+          showToast("评论已发布到本地");
+          return;
+        }
+
+        // 回退：旧版链接无 cb 参数时，上传整个笔记本到新 paste
         try {
           const slim = JSON.parse(JSON.stringify(notebook));
           delete slim.shareToken;
           delete slim.updatedAt;
           delete slim.createdAt;
+          delete slim.commentBucketId;
           if (slim.importantDates && slim.importantDates.length === 0) delete slim.importantDates;
           if (slim.importantDates) {
             slim.importantDates = slim.importantDates.map(d => ({ d: d.date, desc: d.description }));
@@ -3365,16 +3382,13 @@
             baseUrl.hash = "";
             baseUrl.searchParams.set("p", pasteResult.service + ":" + pasteResult.id);
             const newUrl = baseUrl.toString();
-            // 静默更新浏览器 URL，不刷新页面
             window.history.replaceState({}, "", newUrl);
-            // 显示复制链接的 Toast
             showShareLinkToast(newUrl);
             return;
           }
         } catch (e) {
           console.error("评论上传失败:", e);
         }
-        // 上传失败也给个提示
         showToast("评论已发布到本地");
       }
     }
@@ -3576,6 +3590,165 @@
       return await corsGet(rawUrl, 10000);
     }
 
+    // ====== kvdb.io 评论同步服务 ======
+    // 创建评论存储 bucket，返回 bucketId
+    async function createCommentBucket() {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const resp = await fetch("https://kvdb.io", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: "email=shared-notebook@app.local",
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (resp.ok) {
+          const bucketId = (await resp.text()).trim();
+          if (bucketId && bucketId.length > 5) return bucketId;
+        }
+      } catch {}
+      // 尝试通过 CORS 代理
+      try {
+        const result = await corsPost("https://kvdb.io", "email=shared-notebook@app.local", 10000);
+        if (result) {
+          const bucketId = result.trim();
+          if (bucketId && bucketId.length > 5) return bucketId;
+        }
+      } catch {}
+      return null;
+    }
+
+    // 上传评论数据到 kvdb.io（PUT 更新）
+    async function uploadCommentsToBucket(bucketId, notebookId, commentsData) {
+      const key = notebookId.replace(/[^a-zA-Z0-9_:-]/g, "_");
+      const url = `https://kvdb.io/${bucketId}/${key}`;
+      const body = JSON.stringify(commentsData);
+      // 直接 PUT（kvdb.io 支持 CORS）
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const resp = await fetch(url, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (resp.ok) return true;
+      } catch {}
+      // 尝试通过 CORS 代理
+      try {
+        const proxyUrl = "https://corsproxy.io/?" + encodeURIComponent(url);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const resp = await fetch(proxyUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (resp.ok) return true;
+      } catch {}
+      return false;
+    }
+
+    // 从 kvdb.io 获取评论数据
+    async function fetchCommentsFromBucket(bucketId, notebookId) {
+      const key = notebookId.replace(/[^a-zA-Z0-9_:-]/g, "_");
+      const url = `https://kvdb.io/${bucketId}/${key}`;
+      // 先直连
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const resp = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (resp.ok) {
+          const text = await resp.text();
+          if (text && text.trim()) return JSON.parse(text);
+        }
+      } catch {}
+      // 通过 CORS 代理
+      try {
+        const text = await corsGet(url, 10000);
+        if (text && text.trim()) return JSON.parse(text);
+      } catch {}
+      return null;
+    }
+
+    // 收集笔记本中所有评论，按 entryId 分组
+    function collectComments(notebook) {
+      const data = {};
+      (notebook.entries || []).forEach((entry) => {
+        if (entry.comments && entry.comments.length > 0) {
+          data[entry.id] = entry.comments.map(c => ({
+            n: c.nickname || "访客",
+            x: c.text || "",
+            t: c.createdAt || new Date().toISOString()
+          }));
+        }
+      });
+      return data;
+    }
+
+    // 将云端评论合并到笔记本的 entries 中
+    function mergeCloudComments(notebook, cloudComments) {
+      if (!cloudComments || typeof cloudComments !== "object") return;
+      (notebook.entries || []).forEach((entry) => {
+        const cloudEntryComments = cloudComments[entry.id];
+        if (cloudEntryComments && Array.isArray(cloudEntryComments)) {
+          const localComments = entry.comments || [];
+          const allComments = [...localComments];
+          for (const cc of cloudEntryComments) {
+            const exists = localComments.some(lc =>
+              lc.text === (cc.x || cc.text || "") &&
+              lc.nickname === (cc.n || cc.nickname || "访客") &&
+              lc.createdAt === (cc.t || cc.createdAt || "")
+            );
+            if (!exists) {
+              allComments.push({
+                id: createId(),
+                nickname: cc.n || cc.nickname || "访客",
+                text: cc.x || cc.text || "",
+                createdAt: cc.t || cc.createdAt || new Date().toISOString()
+              });
+            }
+          }
+          entry.comments = allComments;
+        }
+      });
+    }
+
+    // 同步单个笔记本的云端评论（用于用户端打开时自动拉取）
+    async function syncCommentsForNotebook(notebook) {
+      if (!notebook.commentBucketId) return false;
+      const cloudComments = await fetchCommentsFromBucket(notebook.commentBucketId, notebook.id);
+      if (cloudComments) {
+        const before = JSON.stringify(notebook.entries);
+        mergeCloudComments(notebook, cloudComments);
+        const after = JSON.stringify(notebook.entries);
+        return before !== after;
+      }
+      return false;
+    }
+
+    // 为所有有 commentBucketId 的笔记本同步评论
+    async function syncAllCommentBuckets() {
+      if (!appData.user?.nickname) return;
+      let changed = false;
+      for (const notebook of appData.notebooks) {
+        if (notebook.commentBucketId) {
+          const updated = await syncCommentsForNotebook(notebook);
+          if (updated) changed = true;
+        }
+      }
+      if (changed) {
+        saveAppData();
+        if (currentNotebookId) renderDetail();
+      }
+    }
+
     async function shareNotebook() {
       const notebook = getCurrentNotebook();
       if (!notebook) return;
@@ -3643,6 +3816,15 @@
         shareButton.textContent = "上传中…";
         const pasteResult = await uploadToPaste(dataStr);
 
+        // 创建或复用评论同步 bucket
+        if (!notebook.commentBucketId) {
+          const bucketId = await createCommentBucket();
+          if (bucketId) {
+            notebook.commentBucketId = bucketId;
+            saveAppData();
+          }
+        }
+
         const baseUrl = new URL(window.location.href);
         baseUrl.search = "";
         baseUrl.hash = "";
@@ -3653,6 +3835,9 @@
         if (pasteResult) {
           // 云端分享：链接只带服务标识和短ID
           baseUrl.searchParams.set("p", pasteResult.service + ":" + pasteResult.id);
+          if (notebook.commentBucketId) {
+            baseUrl.searchParams.set("cb", notebook.commentBucketId);
+          }
           shareUrl = baseUrl.toString();
 
           // 尝试用短链接服务进一步缩短（后台尝试，不阻塞主流程）
@@ -3687,6 +3872,9 @@
           }
           const encoded = toBase64Url(finalData);
           baseUrl.searchParams.set("d", encoded);
+          if (notebook.commentBucketId) {
+            baseUrl.searchParams.set("cb", notebook.commentBucketId);
+          }
           shareUrl = baseUrl.toString();
         }
 
@@ -3998,7 +4186,7 @@
       return normalizeNotebook(parsed);
     }
 
-    function initializeApp() {
+    async function initializeApp() {
       appData = loadAppData();
       saveAppData();
 
@@ -4009,25 +4197,38 @@
       if (pasteParam) {
         const parts = pasteParam.split(":");
         if (parts.length >= 2) {
-          loadSharedFromPaste(parts[0], parts.slice(1).join(":"));
+          const cbParam = queryParams.get("cb") || "";
+          loadSharedFromPaste(parts[0], parts.slice(1).join(":"), cbParam);
           return;
         }
       }
 
       // URL 直连模式: ?d=... 或 ?data=...
       const sharedData = queryParams.get("d") || queryParams.get("data");
+      const cbParamForDirect = queryParams.get("cb") || "";
       if (sharedData) {
         try {
           const sharedNotebook = parseSharedNotebook(sharedData);
           if (sharedNotebook && sharedNotebook.id) {
+            if (cbParamForDirect) {
+              sharedNotebook.commentBucketId = cbParamForDirect;
+            }
             const existingIdx = appData.notebooks.findIndex((n) => n.id === sharedNotebook.id);
             if (existingIdx === -1) {
               appData.notebooks.push(sharedNotebook);
             } else {
-              // 合并评论
               const localNb = appData.notebooks[existingIdx];
+              if (!localNb.commentBucketId && sharedNotebook.commentBucketId) {
+                localNb.commentBucketId = sharedNotebook.commentBucketId;
+              }
               (sharedNotebook.entries || []).forEach((sharedEntry) => {
-                const localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+                let localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+                if (!localEntry) {
+                  localEntry = (localNb.entries || []).find(e =>
+                    (e.text || "") === (sharedEntry.text || "") &&
+                    JSON.stringify(e.images || []) === JSON.stringify(sharedEntry.images || [])
+                  );
+                }
                 if (localEntry) {
                   const localComments = localEntry.comments || [];
                   const sharedComments = sharedEntry.comments || [];
@@ -4038,10 +4239,9 @@
                       lc.createdAt === sc.createdAt
                     );
                     if (!exists) allComments.push(sc);
-                }
-                localEntry.comments = allComments;
-                // 不覆盖本地文字和图片，保留作者原始数据
-              } else {
+                  }
+                  localEntry.comments = allComments;
+                } else {
                   localNb.entries = localNb.entries || [];
                   localNb.entries.push(sharedEntry);
                 }
@@ -4054,6 +4254,20 @@
             updateUserUI();
             renderDetail();
             showPage("detail");
+            // 异步拉取云端评论并更新
+            if (sharedNotebook.commentBucketId) {
+              (async () => {
+                const cloudComments = await fetchCommentsFromBucket(sharedNotebook.commentBucketId, sharedNotebook.id);
+                if (cloudComments) {
+                  const nb = getCurrentNotebook();
+                  if (nb) {
+                    mergeCloudComments(nb, cloudComments);
+                    saveAppData();
+                    renderDetail();
+                  }
+                }
+              })();
+            }
             return;
           }
         } catch (e) {
@@ -4079,12 +4293,14 @@
 
       if (appData.user?.nickname) {
         renderHome();
+        // 异步同步所有已分享笔记本的云端评论
+        syncAllCommentBuckets();
       } else {
         startSplash();
       }
     }
 
-    async function loadSharedFromPaste(service, id) {
+    async function loadSharedFromPaste(service, id, commentBucketId) {
       // 先显示加载状态
       showPage("shareLoading");
 
@@ -4093,7 +4309,6 @@
       for (let attempt = 0; attempt < 2 && !jsonStr; attempt++) {
         jsonStr = await fetchFromPaste(service, id);
         if (!jsonStr && attempt === 0) {
-          // 第一次失败后稍等再重试
           await new Promise(r => setTimeout(r, 800));
         }
       }
@@ -4104,26 +4319,50 @@
       }
 
       try {
-        // 直接解析 JSON
         const parsed = JSON.parse(jsonStr);
         const nb = parseSharedNotebookFromObject(parsed);
         if (nb && nb.id) {
+          // 从 URL 参数设置 commentBucketId（优先于数据中自带的）
+          if (commentBucketId) {
+            nb.commentBucketId = commentBucketId;
+          }
+
+          // 从 kvdb.io 拉取云端评论并合并到分享数据中
+          const bucketId = nb.commentBucketId;
+          if (bucketId) {
+            const cloudComments = await fetchCommentsFromBucket(bucketId, nb.id);
+            if (cloudComments) {
+              mergeCloudComments(nb, cloudComments);
+            }
+          }
+
           const existingIdx = appData.notebooks.findIndex((n) => n.id === nb.id);
           if (existingIdx === -1) {
             // 本地没有该笔记本，直接添加
             appData.notebooks.push(nb);
           } else {
-            // 本地已有该笔记本，合并评论：保留本地评论 + 加入云端新评论
+            // 本地已有该笔记本，合并 entries 和评论
             const localNb = appData.notebooks[existingIdx];
+            // 同步 commentBucketId
+            if (!localNb.commentBucketId && nb.commentBucketId) {
+              localNb.commentBucketId = nb.commentBucketId;
+            }
             (nb.entries || []).forEach((sharedEntry) => {
-              const localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+              // 先按 ID 匹配
+              let localEntry = (localNb.entries || []).find(e => e.id === sharedEntry.id);
+              // 回退：按内容匹配（防止 ID 丢失导致重复）
+              if (!localEntry) {
+                localEntry = (localNb.entries || []).find(e =>
+                  (e.text || "") === (sharedEntry.text || "") &&
+                  JSON.stringify(e.images || []) === JSON.stringify(sharedEntry.images || [])
+                );
+              }
               if (localEntry) {
                 // 合并评论：本地评论 + 云端评论（去重）
                 const localComments = localEntry.comments || [];
                 const sharedComments = sharedEntry.comments || [];
                 const allComments = [...localComments];
                 for (const sc of sharedComments) {
-                  // 按内容+时间去重
                   const exists = localComments.some(lc =>
                     lc.text === sc.text && lc.nickname === sc.nickname &&
                     lc.createdAt === sc.createdAt
@@ -4131,15 +4370,12 @@
                   if (!exists) allComments.push(sc);
                 }
                 localEntry.comments = allComments;
-                // 不覆盖本地文字和图片，保留作者原始数据
               } else {
-                // 本地没有这条 entry，从分享数据添加
                 localNb.entries = localNb.entries || [];
                 localNb.entries.push(sharedEntry);
               }
             });
           }
-          // 保存到 localStorage
           saveAppData();
           isReadOnlyMode = true;
           currentNotebookId = nb.id;
